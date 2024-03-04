@@ -2,9 +2,10 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import xgboost as xgb
+import seaborn as sns
 
 from sklearn.metrics import mean_squared_error
-from datetime import date
+from datetime import date, timedelta
 
 def add_years(d, years):
     try:
@@ -12,78 +13,96 @@ def add_years(d, years):
     except ValueError:
         return d + (date(d.year + years, 1, 1) - date(d.year, 1, 1))
     
-def date_attrib(df):
+def date_feature(df):
     df = df.copy()
     df['hour'] = df.index.hour
     df['dayofweek'] = df.index.dayofweek
     df['quarter'] = df.index.quarter
     df['month'] = df.index.month
-    df['year'] = df.index.year
     df['dayofyear'] = df.index.dayofyear
-    df['dayofmonth'] = df.index.day
-    df['weekofyear'] = df.index.isocalendar().week
+    df['day'] = df.index.day
     return df
 
 # Extract dataframe from csv file
 dataframe = pd.read_csv('kaggle.csv')
-dataframe = dataframe.set_index('Datetime')
-dataframe.index = pd.to_datetime(dataframe.index)
-dataframe = dataframe.sort_index()
+
+# Standarizing and cleaning data
+dataframe.columns = ['datetime', 'consumption_mw']
+dataframe['datetime'] = pd.to_datetime(dataframe.datetime)
+dataframe = dataframe.dropna() # removes null values
+dataframe = dataframe.sort_values(by='datetime')
+dataframe = dataframe.drop_duplicates(subset='datetime')
+
+# Checking time intervals consistency
+dataframe['time_interval'] = dataframe.datetime - dataframe.datetime.shift(1) # Should be 1 hour step
+
+# Fixing 2 hour step
+missing_df = dataframe.loc[dataframe.time_interval == timedelta(hours=2)]
+missing_df['datetime'] = missing_df['datetime'] + timedelta(hours=1)
+dataframe = pd.concat([dataframe, missing_df])
+dataframe = dataframe.drop('time_interval', axis=1)
+dataframe = dataframe.sort_values(by='datetime')
 
 # Setting date based columns
-dataframe = date_attrib(dataframe)
+dataframe = dataframe.set_index('datetime')
+dataframe = date_feature(dataframe)
 
-# Removing outliers
-dataframe = dataframe.query('AEP_MW > 11_000').copy()
-dataframe = dataframe.query('AEP_MW < 24_000').copy()
+# Setting year old lag
+target_map = dataframe['consumption_mw'].to_dict()
+dataframe['year_lag'] = (dataframe.index - pd.Timedelta('364 days')).map(target_map)
+
+# Feature visualization
+#fig, ax = plt.subplots(figsize=(10, 8))
+#sns.boxplot(data=dataframe, x='date_metric', y='consumption_mw', palette='Blues')
+#ax.set_title('Consumption (MW) by date_metric')
+#plt.show()
 
 # Defining Training and Test data
 traindf = dataframe.loc[dataframe.index < '01-01-2016']
 testdf = dataframe.loc[dataframe.index >= '01-01-2016']
 
 # Setting Forecasting model
-ATTRIB = ['hour', 'dayofweek', 'quarter', 'month', 'year', 'dayofyear', 'dayofmonth', 'weekofyear']
-TARGET = 'AEP_MW'
+target = 'consumption_mw'
+feature = [feature for feature in dataframe.columns if feature not in target]
 
-X_train = traindf[ATTRIB]
-y_train = traindf[TARGET]
+X_train = traindf[feature]
+y_train = traindf[target]
 
-X_test = testdf[ATTRIB]
-y_test = testdf[TARGET]
+X_test = testdf[feature]
+y_test = testdf[target]
 
-# Training model
+# Initializing XGBoost
 reg = xgb.XGBRegressor(
     learning_rate=0.1,
     max_depth = 8
 )
+
+# Training model
 reg.fit(X_train, y_train)
 
 # Comparing predicted data with test data
-"""
 testdf['pred'] = reg.predict(X_test)
 dataframe = dataframe.merge(testdf[['pred']], how='left', left_index=True, right_index=True)
-ax = dataframe[TARGET].plot(figsize=(15, 5))
+ax = dataframe[target].plot(figsize=(15, 5))
 dataframe['pred'].plot(ax=ax)
 plt.show()
 
-score = np.sqrt(mean_squared_error(testdf['AEP_MW'], testdf['pred']))
+score = np.sqrt(mean_squared_error(testdf['consumption_mw'], testdf['pred']))
 print(score)
+
 """
+# Retraining with entire data
+reg.fit(dataframe[feature], dataframe[target])
 
-# Retrain with entire data
-reg = xgb.XGBRegressor(
-    learning_rate=0.1,
-    max_depth = 8
-)
-reg.fit(dataframe[ATTRIB], dataframe[TARGET])
-
+# Preview of next year forecast
 last_date = dataframe.index.max()
 next_year = add_years(dataframe.index.max(), 1)
 
 forecast_range = pd.date_range(last_date, next_year, freq='1h')
 forecast_df = pd.DataFrame(index=forecast_range)
-forecast_df = date_attrib(forecast_df)
+forecast_df = date_feature(forecast_df)
 
-forecast_df['pred'] = reg.predict(forecast_df[ATTRIB])
+forecast_df['pred'] = reg.predict(forecast_df[feature])
 forecast_df['pred'].plot(figsize=(15,5))
 plt.show()
+"""
