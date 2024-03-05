@@ -4,15 +4,19 @@ import matplotlib.pyplot as plt
 import xgboost as xgb
 import seaborn as sns
 
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 from datetime import date, timedelta
 
+color_pal = sns.color_palette()
+
+# Add years to datetime, while checking for 29th feb
 def add_years(d, years):
     try:
         return d.replace(year = d.year + years)
     except ValueError:
         return d + (date(d.year + years, 1, 1) - date(d.year, 1, 1))
-    
+
+# Creates time metric columns
 def date_feature(df):
     df = df.copy()
     df['hour'] = df.index.hour
@@ -21,6 +25,11 @@ def date_feature(df):
     df['month'] = df.index.month
     df['dayofyear'] = df.index.dayofyear
     df['day'] = df.index.day
+    return df
+
+def add_lags(df):
+    target_map = df['consumption_mw'].to_dict()
+    df['year_lag'] = (df.index - pd.Timedelta('365 days')).map(target_map)
     return df
 
 # Extract dataframe from csv file
@@ -48,8 +57,7 @@ dataframe = dataframe.set_index('datetime')
 dataframe = date_feature(dataframe)
 
 # Setting year old lag
-target_map = dataframe['consumption_mw'].to_dict()
-dataframe['year_lag'] = (dataframe.index - pd.Timedelta('364 days')).map(target_map)
+dataframe = add_lags(dataframe)
 
 # Feature visualization
 #fig, ax = plt.subplots(figsize=(10, 8))
@@ -80,29 +88,49 @@ reg = xgb.XGBRegressor(
 # Training model
 reg.fit(X_train, y_train)
 
-# Comparing predicted data with test data
+# Forecast on test data
 testdf['pred'] = reg.predict(X_test)
+
+# Comparing predicted data with test data
+rmse_score = np.sqrt(mean_squared_error(testdf['consumption_mw'], testdf['pred']))
+print("RMSE score:", rmse_score)
+
+# Visualizing predicted data with test data
 dataframe = dataframe.merge(testdf[['pred']], how='left', left_index=True, right_index=True)
 ax = dataframe[target].plot(figsize=(15, 5))
 dataframe['pred'].plot(ax=ax)
+plt.legend(['Observed', 'Forecasted'])
+ax.set_title('Comparison of Observed and Forecasted data')
 plt.show()
 
-score = np.sqrt(mean_squared_error(testdf['consumption_mw'], testdf['pred']))
-print(score)
-
-"""
 # Retraining with entire data
 reg.fit(dataframe[feature], dataframe[target])
 
-# Preview of next year forecast
+# Defines range for prediction
 last_date = dataframe.index.max()
 next_year = add_years(dataframe.index.max(), 1)
 
+# Creates dataset for prediction
 forecast_range = pd.date_range(last_date, next_year, freq='1h')
 forecast_df = pd.DataFrame(index=forecast_range)
-forecast_df = date_feature(forecast_df)
+forecast_df['for_forecast'] = True
+dataframe['for_forecast'] = False
 
+# Concatenates both datasets for lag calculation
+concat_df = pd.concat([dataframe, forecast_df])
+
+# Sets features for forecast part of dataset
+concat_df = date_feature(concat_df)
+concat_df = add_lags(concat_df)
+
+# Gets only forecast data range
+forecast_df = concat_df.query('for_forecast').copy()
+
+# Predicts consumption of energy
 forecast_df['pred'] = reg.predict(forecast_df[feature])
-forecast_df['pred'].plot(figsize=(15,5))
+forecast_df['pred'].plot(
+    figsize=(15,5),
+    color=color_pal[2],
+    title='Forecasted consumption'
+)
 plt.show()
-"""

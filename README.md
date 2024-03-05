@@ -101,11 +101,15 @@ Entretanto, ao conferir o gasto por ano, eles não apresentam nenhuma correlaç�
 
 Um ponto sobre métricas de tempo como hora e semana, é que eles são cíclicos, ou seja, se a hora começa com 0, ele cresce até chegar em 23, e depois disso se torna 0 novamente, o que facilita a existência de hábitos e padrões.
 
-Outra categoria que adicionei também foi o atraso onde eu registro o consumo de uma ano anterior a data registrada.
+Outra categoria que adicionei também foi o atraso onde eu registro o consumo de uma ano anterior a data registrada, permitindo que o modelo observe o consumo do mesmo dia no ano anterior.
 
 ```python
-target_map = dataframe['consumption_mw'].to_dict()
-dataframe['year_lag'] = (dataframe.index - pd.Timedelta('364 days')).map(target_map)
+def add_lags(df):
+    target_map = df['consumption_mw'].to_dict()
+    df['year_lag'] = (df.index - pd.Timedelta('365 days')).map(target_map)
+    return df
+
+dataframe = add_lags(dataframe)
 ```
 
 ### Treinando o modelo
@@ -138,24 +142,105 @@ Com os dataframes de teste e treinos prontos, inicializo o __XGBRegressor__ da b
 import xgboost as xgb
 
 # Inicializa o modelo
+reg = xgb.XGBRegressor()
+
+# Treina o modelo
+reg.fit(X_train, y_train)
+
+# Realiza a previsão sobre os dados teste
+testdf['pred'] = reg.predict(X_test)
+```
+
+Após a inicialização do XGBoost e treino do modelo, fazemos uma comparação com os dados de teste ao calcular o __Erro Quadrático Médio__, ou RMSE. O RMSE é basicamente uma medida sobre o desvio padrão dos 
+
+O cálculo para encontrarmos o RMSE é realizando uma somatória da diferença entre os valores previstos com os valores observados elevado ao quadrado, dividido pelo número de valores observados. Depois disso, tiramos a raiz quadrada para chegar no RMSE.
+
+$$RMSE = \sqrt{\frac{1}{n}\sum_{i=1}^{n}{({ŷ_i - y_i})^2}}$$
+
+```python
+rmse_score = np.sqrt(mean_squared_error(testdf['consumption_mw'], testdf['pred']))
+```
+
+Dessa forma, quanto maior o valor, mais distante o modelo previsto está dos valores reais, ou seja, quanto menor o valor, mais perto a previsão vai estar do valor real.
+
+Algumas formas de diminuirmos o valor de RMSE seria por ajustes nos dados, como nas limpezas e preparação dos dados que fizemos antes, ou ajustes na análise de regressão. Como neste modelo estamos usando o __XGBoost__, o ajuste da análise de regressão deve ser feita com base de seus parâmetros, que podem ser encontrados em sua <a href="https://xgboost.readthedocs.io/en/stable/parameter.html">documentação</a>
+
+Para este modelo, segui com esses parâmetros abaixo, chegando a uma pontuação RMSE ao redor de 1800.
+
+```python
 reg = xgb.XGBRegressor(
     learning_rate=0.1,
     max_depth = 8
 )
-
-# Treina o modelo
-reg.fit(X_train, y_train)
 ```
 
-Após a inicialização e treino do modelo, crio uma visualização para comparar o modelo previsto com os dados teste
+Por fim, crio uma visualização para observar a comparação do modelo previsto com o observado.
 
 ```python
 import matplotlib.pyplot as plt
 
-testdf['pred'] = reg.predict(X_test)
 dataframe = dataframe.merge(testdf[['pred']], how='left', left_index=True, right_index=True)
 ax = dataframe[target].plot(figsize=(15, 5))
 dataframe['pred'].plot(ax=ax)
+plt.legend(['Observado', 'Previsto'])
+ax.set_title('Comparação Observado com Previsto')
 plt.show()
 ```
 
+![Comparison between observed and forecasted data](./media/data_comparison.png)
+
+### Prevendo o futuro
+
+Com o modelo de regressão e tratamento dos dados realizado, retreinamos o modelo com todos os dados do kaggle.csv par realizarmos a previsão do ano seguinte aos dados oferecidos.
+
+```python
+reg.fit(dataframe[feature], dataframe[target])
+```
+
+Com o modelo treinado, definimos o alcance da previsão, neste caso, da última data dos dados até o ano seguinte.
+
+```python
+# Adiciona anos na data, enquanto verifica por anos bissextos
+def add_years(d, years):
+    try:
+        return d.replace(year = d.year + years)
+    except ValueError:
+        return d + (date(d.year + years, 1, 1) - date(d.year, 1, 1))
+
+last_date = dataframe.index.max()
+next_year = add_years(dataframe.index.max(), 1)
+```
+
+Então, criamos um dataframe com as novas datas, e adicionamos as novas datas sobre o dataframe original para utilizarmos os dados de consumo do ano anterior (year_lag).
+
+```python
+# Cria um dataframe para previsão
+forecast_range = pd.date_range(last_date, next_year, freq='1h')
+forecast_df = pd.DataFrame(index=forecast_range)
+forecast_df['for_forecast'] = True
+dataframe['for_forecast'] = False
+
+# Concatena os dataframes dos dados tratados com o de previsão
+concat_df = pd.concat([dataframe, forecast_df])
+
+# Adiciona características de data e atraso de um ano 
+concat_df = date_feature(concat_df)
+concat_df = add_lags(concat_df)
+
+# Pega apenas as datas onde iremos realizar a previsão
+forecast_df = concat_df.query('for_forecast').copy()
+```
+
+Com isso, realizamos a previsão com a função __predict()__, e criamos uma visualização.
+
+```python
+forecast_df['pred'] = reg.predict(forecast_df[feature])
+forecast_df['pred'].plot(
+    figsize=(15,5),
+    color=color_pal[2],
+    title='Previsão'
+)
+plt.show()
+```
+
+![Forecasted consumption data](./media/forecasted_data.png)
